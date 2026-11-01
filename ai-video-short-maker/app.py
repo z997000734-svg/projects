@@ -45,19 +45,37 @@ def recognize(path: Path, model_name: str, language: str, device: str,
         from faster_whisper import WhisperModel
     except ImportError as exc:
         raise RuntimeError("缺少 faster-whisper，请先运行 pip install -r requirements.txt") from exc
+    # PyAV 19 removed the metadata_errors keyword that some faster-whisper
+    # releases still pass to av.open(). Keep compatibility with both APIs.
+    import av
+    original_av_open = av.open
+
+    def compatible_av_open(*args, **kwargs):
+        try:
+            return original_av_open(*args, **kwargs)
+        except TypeError as exc:
+            if "metadata_errors" not in kwargs or "metadata_errors" not in str(exc):
+                raise
+            kwargs.pop("metadata_errors", None)
+            return original_av_open(*args, **kwargs)
+
+    av.open = compatible_av_open
     log(f"正在加载 Whisper {model_name} 模型（首次运行可能需要下载）…")
     compute = "float16" if device == "cuda" else "int8"
     model = WhisperModel(model_name, device=device, compute_type=compute)
     lang = None if language == "自动检测" else {"中文": "zh", "英文": "en"}.get(language, language)
-    items, info = model.transcribe(str(path), language=lang, vad_filter=True,
-                                   word_timestamps=False, beam_size=5)
-    log(f"识别语言：{info.language}，开始整理字幕…")
-    output = []
-    for item in items:
-        text = item.text.strip()
-        if text and item.end > item.start:
-            output.append(Segment(float(item.start), float(item.end), text))
-    return output
+    try:
+        items, info = model.transcribe(str(path), language=lang, vad_filter=True,
+                                       word_timestamps=False, beam_size=5)
+        log(f"识别语言：{info.language}，开始整理字幕…")
+        output = []
+        for item in items:
+            text = item.text.strip()
+            if text and item.end > item.start:
+                output.append(Segment(float(item.start), float(item.end), text))
+        return output
+    finally:
+        av.open = original_av_open
 
 
 def make_chunks(segments: list[Segment], duration: float, target: int) -> list[tuple[float, float, str]]:
@@ -251,3 +269,4 @@ if __name__ == "__main__":
     root=tk.Tk()
     App(root)
     root.mainloop()
+
